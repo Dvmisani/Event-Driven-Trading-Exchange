@@ -39,6 +39,21 @@ Simplified institutional backend trading exchange modeled on **JSE**, **NASDAQ**
 ```
 ---
 
+## Why This Project Matters
+
+Trading platforms are fundamentally different from traditional CRUD applications.
+
+They must:
+
+- Execute trades deterministically
+- Maintain immutable audit history
+- Recover system state from events
+- Stream market data in real time
+- Scale independently across financial instruments
+- Provide complete traceability for compliance and analysis
+
+This project explores those engineering challenges using modern distributed systems patterns.
+
 ## Screenshots
 ### 1. Live Trading Terminal (React + SignalR)
 ![Trading Terminal](docs/screenshots/trading-terminal.png)
