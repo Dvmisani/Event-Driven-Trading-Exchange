@@ -1,3 +1,0 @@
-test_suite,test_name,scenario,duration,step_name,request_count,ok,failed,rps,min,mean,max,50_percent,75_percent,95_percent,99_percent,std_dev,data_transfer_min_kb,data_transfer_mean_kb,data_transfer_max_kb,data_transfer_all_mb
-nbomber_default_test_suite_name,nbomber_default_test_name,matching_engine_throughput,00:00:05,global information,565616,565616,0,113123.2,0,0.14,122.29,0,0,0.01,0.38,1.9,0,0,0,0
-nbomber_default_test_suite_name,nbomber_default_test_name,signalr_broadcast_throughput,00:00:05,global information,4456483,4456483,0,891296.6,0,0.02,104.04,0.01,0.01,0.02,0.03,0.29,0,0,0,0
