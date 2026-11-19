@@ -1,0 +1,52 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Event-Driven Trading Exchange | JSE / NASDAQ / Binance Engine</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; margin: 1.5rem; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1rem; }
+    input, select, button { padding: 0.45rem; border-radius: 4px; border: 1px solid #475569; background: #0f172a; color: #f8fafc; }
+    button { background: #2563eb; border: none; cursor: pointer; font-weight: 600; }
+    .bid { color: #4ade80; } .ask { color: #f87171; }
+  </style>
+</head>
+<body>
+  <h2>Event-Driven Trading Exchange (.NET 10 &bull; Kafka &bull; SQL Server &bull; SignalR)</h2>
+  <div>
+    Symbol: <input id="sym" value="JSE:NPN" />
+    Trader: <input id="trader" value="trader-alpha" />
+    Side: <select id="side"><option>Buy</option><option>Sell</option></select>
+    Price: <input id="price" type="number" value="102" />
+    Qty: <input id="qty" type="number" value="100" />
+    <button onclick="placeOrder()">Submit Order</button>
+    <a href="/swagger" style="color:#38bdf8;margin-left:1rem;">Swagger API</a>
+  </div>
+  <div class="grid">
+    <div class="card"><h3>Order Book Depth</h3><div id="book">Waiting for events...</div></div>
+    <div class="card"><h3>Live Trade Tape (SignalR)</h3><ul id="trades"></ul></div>
+    <div class="card"><h3>Emitted Domain Events</h3><pre id="evts" style="white-space:pre-wrap;font-size:0.8rem;"></pre></div>
+  </div>
+  <script>
+    const conn = new signalR.HubConnectionBuilder().withUrl("/hubs/marketdata").withAutomaticReconnect().build();
+    conn.on("OrderBookUpdated", snap => {
+      const asks = [...snap.asks].reverse().map(a => `<div class="ask">ASK ${a.totalQuantity} @ R${a.price} (${a.orderCount})</div>`).join("");
+      const bids = snap.bids.map(b => `<div class="bid">BID ${b.totalQuantity} @ R${b.price} (${b.orderCount})</div>`).join("");
+      document.getElementById("book").innerHTML = `${asks}<hr/>${bids || "Empty"}`;
+    });
+    conn.on("TradeExecuted", t => {
+      const li = document.createElement("li");
+      li.textContent = `${t.symbol}: ${t.quantity} @ R${t.price} (${t.buyerTraderId} <- ${t.sellerTraderId})`;
+      document.getElementById("trades").prepend(li);
+    });
+    conn.start().then(() => conn.invoke("SubscribeSymbol", document.getElementById("sym").value));
+    async function placeOrder() {
+      const body = { symbol: sym.value, traderId: trader.value, side: side.value, price: +price.value, quantity: +qty.value };
+      const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      document.getElementById("evts").textContent = JSON.stringify(await res.json(), null, 2);
+    }
+  </script>
+</body>
+</html>

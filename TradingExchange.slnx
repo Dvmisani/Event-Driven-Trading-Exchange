@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TradingExchange.Api/TradingExchange.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TradingExchange.Tests/TradingExchange.Tests.csproj" />
+  </Folder>
+</Solution>
