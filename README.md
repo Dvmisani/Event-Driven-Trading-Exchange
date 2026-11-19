@@ -1,6 +1,6 @@
 ﻿# Event-Driven Trading Exchange (.NET 10 • Kafka • SQL Server 2025 • SignalR)
 
-[![Build & Test (SQL Server 2025 + Kafka)](https://github.com/dvmisani/Event-Driven-Trading-Exchange/actions/workflows/ci.yml/badge.svg)](https://github.com/dvmisani/Event-Driven-Trading-Exchange/actions/workflows/ci.yml)
+[![Build & Test (SQL Server 2025 + Kafka)](https://github.com/Dvmisani/Event-Driven-Trading-Exchange/actions/workflows/ci.yml/badge.svg)](https://github.com/Dvmisani/Event-Driven-Trading-Exchange/actions/workflows/ci.yml)
 
 Simplified institutional backend trading exchange modeled on **JSE**, **NASDAQ**, and **Binance** market mechanics—built with **C# / .NET 10**, **Event Sourcing**, **CQRS**, **Apache Kafka**, **SQL Server 2025**, and **SignalR WebSockets**.
 
@@ -23,6 +23,7 @@ flowchart LR
     Worker --> ReadDb[("SQL Server Read Models<br/>Orders • Trades • Depth")]
     Worker -->|Real-Time Push| Hub["SignalR Hub (/hubs/marketdata)"]
     Hub -->|WebSockets| Feed["Live Depth & Trade Tape"]
+```
 
 ## API Endpoints & Quickstart
 
@@ -41,3 +42,4 @@ docker compose up --build
 
 # Run unit replay + end-to-end Testcontainers suite
 dotnet test --nologo --logger "console;verbosity=normal"
+```
