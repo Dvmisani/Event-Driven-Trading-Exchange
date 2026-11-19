@@ -13,70 +13,186 @@ Simplified institutional backend trading exchange modeled on **JSE**, **NASDAQ**
 
 ## System Architecture
 
-```mermaid
-flowchart LR
-    Client["Trading Client / UI"] -->|POST /api/orders| Api["Command API (.NET 10)"]
-    Api --> Engine["EventSourcedOrderBook<br/>(Price-Time Priority)"]
-    Engine -->|Append Events| Store[("SQL Server Event Store")]
-    Engine -->|Publish Keyed by Symbol| Kafka[["Apache Kafka (exchange.events)"]]
-    Kafka --> Worker["CQRS Projection Worker"]
-    Worker --> ReadDb[("SQL Server Read Models<br/>Orders • Trades • Depth")]
-    Worker -->|Real-Time Push| Hub["SignalR Hub (/hubs/marketdata)"]
-    Hub -->|WebSockets| Feed["Live Depth & Trade Tape"]
-```
-
-## API Endpoints & Quickstart
-
-| Method | Endpoint | Side | Description |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/api/orders` | Command | Submit limit `Buy` / `Sell` order; returns emitted domain events |
-| `DELETE` | `/api/orders/{symbol}/{orderId}` | Command | Cancel active resting order and emit `OrderCancelled` |
-| `POST` | `/api/admin/rebuild/{symbol}` | Admin | Replay SQL Server event stream from sequence `1` to rebuild state |
-| `GET` | `/api/marketdata/{symbol}/orderbook` | Query | Aggregated L2 order book depth (`Bids` and `Asks`) |
-| `GET` | `/api/marketdata/{symbol}/trades` | Query | Recent executed trades tape |
-| `GET` | `/api/marketdata/{symbol}/events` | Query | Immutable ordered event store log |
-
-```bash
-# Run full stack (API on :5080, Kafka UI on :8085, SQL Server 2025 on :1433)
-docker compose up --build
-
-# Run unit replay + end-to-end Testcontainers suite
-dotnet test --nologo --logger "console;verbosity=normal"
-```
-
-## Kafka Partitioning & Fault-Tolerance Architecture
-
-All domain events are published to `exchange.events` using `Key = Symbol` (Murmur2 key hashing) with `Acks = All` and `EnableIdempotence = true`. Partition assignments below are illustrative:
-
 ```text
-AAPL   ──▶ Partition 1 ──▶ Strict FIFO per-symbol order lifecycle (OrderPlaced → OrderMatched → TradeExecuted)
-MSFT   ──▶ Partition 2 ──▶ Parallel horizontal throughput without cross-symbol lock contention
-BTCUSD ──▶ Partition 3 ──▶ Independent consumer scaling across partition groups
+Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  React Trading Terminal
+
+Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â”‚
+
+Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â–¼
+
+Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  ASP.NET Core API
+
+Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â”‚
+
+Â Â Â Â Â Â Â Â Â Â Â Â  â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+
+Â Â Â Â Â Â Â Â Â Â Â Â  â–¼Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â–¼
+
+Â Â Â Â Â  Command HandlersÂ Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  Query Handlers
+
+Â Â Â Â Â Â Â Â Â Â Â Â  â”‚Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â”‚
+
+Â Â Â Â Â Â Â Â Â Â Â Â  â–¼Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â–¼
+
+Â Â Â Â Â  Matching EngineÂ Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  Read Models
+
+Â Â Â Â Â Â Â Â Â Â Â Â  â”‚Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â–²
+
+Â Â Â Â Â Â Â Â Â Â Â Â  â–¼Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â”‚
+
+Â Â Â Â Â  SQL Event StoreÂ Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â”‚
+
+Â Â Â Â Â Â Â Â Â Â Â Â  â”‚Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â”‚
+
+Â Â Â Â Â Â Â Â Â Â Â Â  â–¼Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â”‚
+
+Â Â Â Â Â Â Â Â  Apache Kafka â”€â”€â”€â”€â”€â”€â”€â”€â”€â–º Projection Worker
+
+Â Â Â Â Â Â Â Â Â Â Â Â  â”‚Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â”‚
+
+Â Â Â Â Â Â Â Â Â Â Â Â  â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â–º SignalR Hub â”€â”€â”€â”€â”€â”€â”˜
+
+Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â”‚
+
+Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  â–¼
+
+Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â Â  Connected Clients
 ```
 
-- **End-to-End Idempotency:** Command retries carrying `ClientRequestId` (or `X-Idempotency-Key`) return the cached response without duplicate matching, while `ProjectionApplier` deduplicates at-least-once Kafka deliveries by `EventId`.
-- **Dead Letter Queue (`exchange.events.deadletter`):** Poison or malformed messages failing bounded projection retries are routed to `exchange.events.deadletter` (and logged in SQL Server, viewable at `/api/admin/deadletters`) before the partition offset is committed, so one bad payload never stalls an entire symbol stream.
+---
 
-## Observability: OpenTelemetry, Jaeger, Prometheus & Grafana
+## Technology Stack
 
-- **End-to-End Distributed Tracing (`TradingExchange.Engine`):** Propagates W3C `traceparent` headers across Kafka message headers to link `OrderSubmission` → `MatchingEngine` → `KafkaPublish` → `ProjectionProcessing` → `SignalRBroadcast` into a single unified waterfall trace in **Jaeger UI** (`http://localhost:16686`).
-- **Prometheus Metrics (`/metrics`):** Exposes `exchange_orders_submitted_total`, `exchange_trades_executed_total`, `exchange_matching_latency_ms`, `exchange_projection_lag_ms`, `exchange_kafka_messages_published_total`, `exchange_kafka_messages_consumed_total`, and `exchange_signalr_active_connections`, scraped by **Prometheus** (`http://localhost:9090`).
-- **Pre-Provisioned Grafana Dashboard (`http://localhost:3000`):** Auto-provisions the *Event-Driven Trading Exchange: Live Telemetry* board with live panels for Orders/sec, Trades/sec, Kafka throughput, p95 Projection Lag, p95 Matching Latency, and active SignalR subscribers.
+| Layer | Technology |
+| --- | --- |
+| Backend | .NET 10, ASP.NET Core |
+| Messaging | Apache Kafka |
+| Database | SQL Server |
+| Real\-Time Communication | SignalR |
+| Architecture | Event Sourcing, CQRS |
+| Testing | xUnit, Testcontainers, NBomber |
+| Observability | OpenTelemetry, Jaeger, Prometheus, Grafana |
+| Cloud | Azure Container Apps, Azure SQL, Azure Event Hubs |
+| Infrastructure | Docker, Bicep, GitHub Actions |
 
-## Performance Benchmarks (NBomber)
+---
 
-Measured locally using **NBomber** on an **Intel(R) Core(TM) i5-10310U CPU @ 1.70GHz** (15.8 GB RAM, `.NET 10.0.15`):
+## Performance Benchmarks
 
-| Metric | Target | Measured Result | Latency (Mean / p95) | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **Order Submissions & Matching** | `10,000+ orders/sec` | **113,123 orders/sec** | `0.14 ms` / `0.01 ms` | PASS |
-| **Matching Engine Latency** | `< 5.00 ms` | **0.14 ms** (p99: `0.38 ms`) | `0.00 ms` p50 | PASS |
-| **Event Stream Replay Speed** | `100,000+ events/sec` | **1,924,082 events/sec** (250,000 events in `129.9 ms`) | `0.52 µs/event` | PASS |
-| **SignalR Market Data Broadcasts** | `1,000+ broadcasts/sec` | **891,297 broadcasts/sec** | `0.02 ms` / `0.02 ms` | PASS |
+### Order Processing
 
-These are single-machine results and will vary with hardware and configuration.
+- Sustained throughput: 113,123 orders per second
+- Event replay throughput: 1.9 million events per second
 
-## Azure Cloud Architecture & Live React Trading UI
+### Reliability
 
-- **Azure Bicep IaC (`infra/main.bicep`) & CI/CD (`.github/workflows/deploy-azure.yml`):** Provisions **Azure Container Apps**, **Azure Container Registry**, **Azure SQL Database**, **Azure Event Hubs for Kafka** (`SaslSsl` over port `9093`), and **Azure Application Insights** in `southafricanorth`.
-- **Live React + SignalR Trading Terminal (`/`):** Served directly by ASP.NET Core static files at `http://localhost:5080/`, streaming live L2 market depth (`OrderBookUpdated`) and trade executions (`TradeExecuted`) over WebSockets (`/hubs/marketdata`) with Limit, Market, Stop, IOC, and FOK order entry.
+- Idempotent command handling
+- Event persistence guarantees
+- Dead Letter Queue recovery workflow
+- Deterministic replay validation
+
+Benchmarking performed using NBomber under containerized test environments.
+
+---
+
+## Engineering Challenges Solved
+
+### Event Ordering
+
+Guarantees FIFO matching behaviour per instrument using Kafka partition keys aligned to trading symbols.
+
+### State Recovery
+
+Allows complete exchange recovery by rebuilding projections from stored event streams.
+
+### Scalability
+
+Read and write workloads scale independently through CQRS and partitioned event processing.
+
+### Traceability
+
+Every trade, order, cancellation, and projection update can be traced end\-to\-end through OpenTelemetry instrumentation.
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+Validation of matching engine logic and domain rules.
+
+### Integration Tests
+
+End\-to\-end verification across:
+
+- API
+- SQL Server
+- Kafka
+- SignalR
+- Projection services
+
+### Performance Tests
+
+NBomber workloads validate:
+
+- Throughput
+- Latency
+- Replay performance
+- Resource utilization
+
+---
+
+## Key Engineering Lessons
+
+Building this platform deepened expertise in:
+
+- Event Sourcing
+- CQRS
+- Apache Kafka
+- Distributed Systems Design
+- Real\-Time Streaming Architectures
+- High\-Performance .NET Development
+- Observability and Monitoring
+- Financial Market Infrastructure
+
+---
+
+## Future Enhancements
+
+- Multi\-asset trading support
+- Risk and margin management
+- Market surveillance engine
+- FIX protocol integration
+- Kubernetes deployment
+- Multi\-region replication
+- Advanced order types
+- AI\-powered anomaly detection
+
+---
+
+## Author
+
+Dumisani A. Baloyi
+
+Software Engineer focused on Backend Development, Cloud Engineering, Enterprise AI, and Financial Systems.
+
+
+## Screenshots
+
+### 1. Live Trading Terminal (React + SignalR)
+![Trading Terminal](docs/screenshots/trading-terminal.png)
+
+### 2. Grafana Live Telemetry Dashboard
+![Grafana Dashboard](docs/screenshots/grafana-dashboard.png)
+
+### 3. Jaeger Distributed Trace View
+![Jaeger Trace View](docs/screenshots/jaeger-trace.png)
+
+### 4. Apache Kafka Event Backbone (Kafbat UI)
+![Kafka UI](docs/screenshots/kafka-ui.png)
+
+### 5. NBomber Performance Benchmark Report
+![NBomber Benchmark](docs/screenshots/nbomber-benchmark.png)
+
+### 6. Automated xUnit & Testcontainers Suite
+![Dotnet Tests](docs/screenshots/dotnet-tests.png)
