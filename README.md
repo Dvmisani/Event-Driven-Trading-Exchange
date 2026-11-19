@@ -1,242 +1,82 @@
-# Event\-Driven Trading Exchange
+# Event-Driven Trading Exchange (.NET 10 • Kafka • SQL Server 2025 • SignalR)
 
-A production\-style trading exchange inspired by modern financial market infrastructure such as NASDAQ, JSE, and Binance.
+[![Build & Test (SQL Server 2025 + Kafka)](https://github.com/Dvmisani/Event-Driven-Trading-Exchange/actions/workflows/ci.yml/badge.svg)](https://github.com/Dvmisani/Event-Driven-Trading-Exchange/actions/workflows/ci.yml)
 
-Built with C\#, .NET 10, Apache Kafka, SQL Server, SignalR, CQRS, and Event Sourcing, the platform processes orders through an event\-driven architecture, maintains immutable audit history, streams real\-time market data, and demonstrates horizontal scalability using partitioned message processing.
+Simplified institutional backend trading exchange modeled on **JSE**, **NASDAQ**, and **Binance** market mechanics, built with **C# / .NET 10**, **Event Sourcing**, **CQRS**, **Apache Kafka**, **SQL Server 2025**, and **SignalR WebSockets**.
 
-## Live Demonstration
+## Core Engineering Patterns
 
-- Video Walkthrough: Coming Soon
-- Architecture Overview: Coming Soon
-- Azure Deployment: Coming Soon
-
----
-
-## Why This Project?
-
-Most portfolio projects demonstrate CRUD operations.
-
-Real exchanges face a different set of engineering challenges:
-
-- High\-throughput order processing
-- Deterministic trade execution
-- Immutable audit trails
-- Real\-time market data distribution
-- Event replay and recovery
-- Horizontal scalability
-- Fault tolerance under load
-
-This project was built to demonstrate how those challenges can be addressed using patterns commonly found in production\-grade distributed systems.
-
----
-
-## Core Features
-
-### Event\-Sourced Matching Engine
-
-- Price\-Time Priority (FIFO) order matching
-- Immutable event streams
-- Full event replay capability
-- Deterministic trade execution
-
-### CQRS Architecture
-
-- Commands separated from query workloads
-- Write model optimized for consistency
-- Read model optimized for performance
-- Independent scalability of read and write operations
-
-### Apache Kafka Event Backbone
-
-- Symbol\-based partitioning
-- Ordered event processing
-- Dead Letter Queue (DLQ) support
-- Idempotent event consumption
-
-### Real\-Time Market Data
-
-- SignalR WebSocket streaming
-- Live trade broadcasting
-- Real\-time order book updates
-- Immediate client synchronization
-
-### Observability
-
-- OpenTelemetry distributed tracing
-- Jaeger trace visualization
-- Prometheus metrics collection
-- Grafana dashboards
-
-### Production Engineering Practices
-
-- Docker containerization
-- Infrastructure as Code (Bicep)
-- Automated CI/CD pipelines
-- Integration testing
-- Performance benchmarking
-
----
+- **Price-Time Priority Matching Engine:** Matches aggressive orders against resting limit books (`Bids` descending, `Asks` ascending, FIFO within price levels) at the resting maker's price.
+- **Pure Event Sourcing:** `EvaluatePlaceOrder` and `EvaluateCancelOrder` never mutate state; every action emits immutable domain events (`OrderPlaced`, `OrderMatched`, `TradeExecuted`, `OrderCancelled`) persisted to an append-only SQL Server Event Store and replayable on startup or via `/api/admin/rebuild/{symbol}`.
+- **Strict CQRS + Apache Kafka:** Commands write to the Event Store and publish keyed by `Symbol` to Kafka (`exchange.events`), while an idempotent `BackgroundService` consumer projects read models (`Orders`, `Trades`, `DepthLevels`).
+- **Real-Time SignalR Market Data:** Pushes live order book depth snapshots (`OrderBookUpdated`) and trade ticks (`TradeExecuted`) over WebSockets to subscribed clients (`/hubs/marketdata`).
 
 ## System Architecture
 
-                    React Trading Terminal
+```mermaid
+flowchart LR
+    Client["Trading Client / UI"] -->|POST /api/orders| Api["Command API (.NET 10)"]
+    Api --> Engine["EventSourcedOrderBook<br/>(Price-Time Priority)"]
+    Engine -->|Append Events| Store[("SQL Server Event Store")]
+    Engine -->|Publish Keyed by Symbol| Kafka[["Apache Kafka (exchange.events)"]]
+    Kafka --> Worker["CQRS Projection Worker"]
+    Worker --> ReadDb[("SQL Server Read Models<br/>Orders • Trades • Depth")]
+    Worker -->|Real-Time Push| Hub["SignalR Hub (/hubs/marketdata)"]
+    Hub -->|WebSockets| Feed["Live Depth & Trade Tape"]
+```
 
-                               │
+## API Endpoints & Quickstart
 
-                               ▼
+| Method | Endpoint | Side | Description |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/api/orders` | Command | Submit limit `Buy` / `Sell` order; returns emitted domain events |
+| `DELETE` | `/api/orders/{symbol}/{orderId}` | Command | Cancel active resting order and emit `OrderCancelled` |
+| `POST` | `/api/admin/rebuild/{symbol}` | Admin | Replay SQL Server event stream from sequence `1` to rebuild state |
+| `GET` | `/api/marketdata/{symbol}/orderbook` | Query | Aggregated L2 order book depth (`Bids` and `Asks`) |
+| `GET` | `/api/marketdata/{symbol}/trades` | Query | Recent executed trades tape |
+| `GET` | `/api/marketdata/{symbol}/events` | Query | Immutable ordered event store log |
 
-                     ASP.NET Core API
+```bash
+# Run full stack (API on :5080, Kafka UI on :8085, SQL Server 2025 on :1433)
+docker compose up --build
 
-                               │
+# Run unit replay + end-to-end Testcontainers suite
+dotnet test --nologo --logger "console;verbosity=normal"
+```
 
-             ┌─────────────────┴─────────────────┐
+## Kafka Partitioning & Fault-Tolerance Architecture
 
-             ▼                                   ▼
+All domain events are published to `exchange.events` using `Key = Symbol` (Murmur2 key hashing) with `Acks = All` and `EnableIdempotence = true`. Partition assignments below are illustrative:
 
-      Command Handlers                   Query Handlers
+```text
+AAPL   ──▶ Partition 1 ──▶ Strict FIFO per-symbol order lifecycle (OrderPlaced → OrderMatched → TradeExecuted)
+MSFT   ──▶ Partition 2 ──▶ Parallel horizontal throughput without cross-symbol lock contention
+BTCUSD ──▶ Partition 3 ──▶ Independent consumer scaling across partition groups
+```
 
-             │                                   │
+- **End-to-End Idempotency:** Command retries carrying `ClientRequestId` (or `X-Idempotency-Key`) return the cached response without duplicate matching, while `ProjectionApplier` deduplicates at-least-once Kafka deliveries by `EventId`.
+- **Dead Letter Queue (`exchange.events.deadletter`):** Poison or malformed messages failing bounded projection retries are routed to `exchange.events.deadletter` (and logged in SQL Server, viewable at `/api/admin/deadletters`) before the partition offset is committed, so one bad payload never stalls an entire symbol stream.
 
-             ▼                                   ▼
+## Observability: OpenTelemetry, Jaeger, Prometheus & Grafana
 
-      Matching Engine                     Read Models
+- **End-to-End Distributed Tracing (`TradingExchange.Engine`):** Propagates W3C `traceparent` headers across Kafka message headers to link `OrderSubmission` → `MatchingEngine` → `KafkaPublish` → `ProjectionProcessing` → `SignalRBroadcast` into a single unified waterfall trace in **Jaeger UI** (`http://localhost:16686`).
+- **Prometheus Metrics (`/metrics`):** Exposes `exchange_orders_submitted_total`, `exchange_trades_executed_total`, `exchange_matching_latency_ms`, `exchange_projection_lag_ms`, `exchange_kafka_messages_published_total`, `exchange_kafka_messages_consumed_total`, and `exchange_signalr_active_connections`, scraped by **Prometheus** (`http://localhost:9090`).
+- **Pre-Provisioned Grafana Dashboard (`http://localhost:3000`):** Auto-provisions the *Event-Driven Trading Exchange: Live Telemetry* board with live panels for Orders/sec, Trades/sec, Kafka throughput, p95 Projection Lag, p95 Matching Latency, and active SignalR subscribers.
 
-             │                                   ▲
+## Performance Benchmarks (NBomber)
 
-             ▼                                   │
+Measured locally using **NBomber** on an **Intel(R) Core(TM) i5-10310U CPU @ 1.70GHz** (15.8 GB RAM, `.NET 10.0.15`):
 
-      SQL Event Store                            │
+| Metric | Target | Measured Result | Latency (Mean / p95) | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **Order Submissions & Matching** | `10,000+ orders/sec` | **113,123 orders/sec** | `0.14 ms` / `0.01 ms` | PASS |
+| **Matching Engine Latency** | `< 5.00 ms` | **0.14 ms** (p99: `0.38 ms`) | `0.00 ms` p50 | PASS |
+| **Event Stream Replay Speed** | `100,000+ events/sec` | **1,924,082 events/sec** (250,000 events in `129.9 ms`) | `0.52 µs/event` | PASS |
+| **SignalR Market Data Broadcasts** | `1,000+ broadcasts/sec` | **891,297 broadcasts/sec** | `0.02 ms` / `0.02 ms` | PASS |
 
-             │                                   │
+These are single-machine results and will vary with hardware and configuration.
 
-             ▼                                   │
+## Azure Cloud Architecture & Live React Trading UI
 
-         Apache Kafka ─────────► Projection Worker
-
-             │                                   │
-
-             └──────────────► SignalR Hub ──────┘
-
-                                         │
-
-                                         ▼
-
-                                 Connected Clients
-
----
-
-## Technology Stack
-
-| Layer | Technology |
-| --- | --- |
-| Backend | .NET 10, ASP.NET Core |
-| Messaging | Apache Kafka |
-| Database | SQL Server |
-| Real\-Time Communication | SignalR |
-| Architecture | Event Sourcing, CQRS |
-| Testing | xUnit, Testcontainers, NBomber |
-| Observability | OpenTelemetry, Jaeger, Prometheus, Grafana |
-| Cloud | Azure Container Apps, Azure SQL, Azure Event Hubs |
-| Infrastructure | Docker, Bicep, GitHub Actions |
-
----
-
-## Performance Benchmarks
-
-### Order Processing
-
-- Sustained throughput: 113,123 orders per second
-- Event replay throughput: 1.9 million events per second
-
-### Reliability
-
-- Idempotent command handling
-- Event persistence guarantees
-- Dead Letter Queue recovery workflow
-- Deterministic replay validation
-
-Benchmarking performed using NBomber under containerized test environments.
-
----
-
-## Engineering Challenges Solved
-
-### Event Ordering
-
-Guarantees FIFO matching behaviour per instrument using Kafka partition keys aligned to trading symbols.
-
-### State Recovery
-
-Allows complete exchange recovery by rebuilding projections from stored event streams.
-
-### Scalability
-
-Read and write workloads scale independently through CQRS and partitioned event processing.
-
-### Traceability
-
-Every trade, order, cancellation, and projection update can be traced end\-to\-end through OpenTelemetry instrumentation.
-
----
-
-## Testing Strategy
-
-### Unit Tests
-
-Validation of matching engine logic and domain rules.
-
-### Integration Tests
-
-End\-to\-end verification across:
-
-- API
-- SQL Server
-- Kafka
-- SignalR
-- Projection services
-
-### Performance Tests
-
-NBomber workloads validate:
-
-- Throughput
-- Latency
-- Replay performance
-- Resource utilization
-
----
-
-## Key Engineering Lessons
-
-Building this platform deepened expertise in:
-
-- Event Sourcing
-- CQRS
-- Apache Kafka
-- Distributed Systems Design
-- Real\-Time Streaming Architectures
-- High\-Performance .NET Development
-- Observability and Monitoring
-- Financial Market Infrastructure
-
----
-
-## Future Enhancements
-
-- Multi\-asset trading support
-- Risk and margin management
-- Market surveillance engine
-- FIX protocol integration
-- Kubernetes deployment
-- Multi\-region replication
-- Advanced order types
-- AI\-powered anomaly detection
-
----
-
-## Author
-
-Dumisani A. Baloyi
-
-Software Engineer focused on Backend Development, Cloud Engineering, Enterprise AI, and Financial Systems.
-
+- **Azure Bicep IaC (`infra/main.bicep`) & CI/CD (`.github/workflows/deploy-azure.yml`):** Provisions **Azure Container Apps**, **Azure Container Registry**, **Azure SQL Database**, **Azure Event Hubs for Kafka** (`SaslSsl` over port `9093`), and **Azure Application Insights** in `southafricanorth`.
+- **Live React + SignalR Trading Terminal (`/`):** Served directly by ASP.NET Core static files at `http://localhost:5080/`, streaming live L2 market depth (`OrderBookUpdated`) and trade executions (`TradeExecuted`) over WebSockets (`/hubs/marketdata`) with Limit, Market, Stop, IOC, and FOK order entry.
