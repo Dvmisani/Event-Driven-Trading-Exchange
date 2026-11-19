@@ -1,0 +1,50 @@
+﻿{
+  "title": "Event-Driven Trading Exchange — Live Telemetry",
+  "uid": "trading-exchange-live",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Orders / sec",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 8 },
+      "targets": [{ "expr": "sum(rate(exchange_orders_submitted_total[1m])) by (status)", "legendFormat": "{{status}}" }]
+    },
+    {
+      "id": 2,
+      "title": "Trades / sec",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 0, "w": 8, "h": 8 },
+      "targets": [{ "expr": "sum(rate(exchange_trades_executed_total[1m])) by (symbol)", "legendFormat": "{{symbol}}" }]
+    },
+    {
+      "id": 3,
+      "title": "Active SignalR Connections",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 0, "w": 8, "h": 8 },
+      "targets": [{ "expr": "sum(exchange_signalr_active_connections)" }]
+    },
+    {
+      "id": 4,
+      "title": "Kafka Throughput (msg/sec)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum(rate(exchange_kafka_messages_published_total[1m]))", "legendFormat": "Published/s" },
+        { "expr": "sum(rate(exchange_kafka_messages_consumed_total[1m]))", "legendFormat": "Consumed/s" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Projection Lag p95 (ms) & Matching Latency p95 (ms)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(exchange_projection_lag_ms_bucket[1m])) by (le))", "legendFormat": "Projection Lag p95 (ms)" },
+        { "expr": "histogram_quantile(0.95, sum(rate(exchange_matching_latency_ms_bucket[1m])) by (le))", "legendFormat": "Matching Latency p95 (ms)" }
+      ]
+    }
+  ]
+}

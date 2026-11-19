@@ -56,3 +56,9 @@ BTCUSD ──▶ Partition 3 ──▶ Independent consumer scaling across parti
 
 - **End-to-End Idempotency:** Command retries carrying `ClientRequestId` (or `X-Idempotency-Key`) return the cached response without duplicate matching, while `ProjectionApplier` deduplicates at-least-once Kafka deliveries by `EventId`.
 - **Dead Letter Queue (`exchange.events.deadletter`):** Poison or malformed messages failing bounded projection retries are routed to `exchange.events.deadletter` (and logged in SQL Server `/api/admin/deadletters`) before committing the partition offset so one bad payload never stalls an entire symbol stream.
+
+## Observability: OpenTelemetry, Jaeger, Prometheus & Grafana
+
+- **End-to-End Distributed Tracing (`TradingExchange.Engine`):** Propagates W3C `traceparent` headers across Kafka message headers to link `OrderSubmission` → `MatchingEngine` → `KafkaPublish` → `ProjectionProcessing` → `SignalRBroadcast` into a single unified waterfall trace in **Jaeger UI** (`http://localhost:16686`).
+- **Prometheus Metrics (`/metrics`):** Exposes `exchange_orders_submitted_total`, `exchange_trades_executed_total`, `exchange_matching_latency_ms`, `exchange_projection_lag_ms`, `exchange_kafka_messages_published_total`, `exchange_kafka_messages_consumed_total`, and `exchange_signalr_active_connections` scraped by **Prometheus** (`http://localhost:9090`).
+- **Pre-Provisioned Grafana Dashboard (`http://localhost:3000`):** Auto-provisions the *Event-Driven Trading Exchange — Live Telemetry* board with live panels for Orders/sec, Trades/sec, Kafka throughput, p95 Projection Lag, p95 Matching Latency, and active SignalR subscribers.

@@ -1,7 +1,9 @@
-﻿using System.Text.Json;
+﻿using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using TradingExchange.Api.Domain;
 using TradingExchange.Api.Infrastructure;
+using TradingExchange.Api.Observability;
 using TradingExchange.Api.Risk;
 
 namespace TradingExchange.Api.Services;
@@ -30,6 +32,12 @@ public sealed class TradingCommandService
 
     public async Task<OrderCommandResponse> PlaceOrderAsync(PlaceOrderCommand cmd, CancellationToken ct = default)
     {
+        using var submissionSpan = ExchangeTelemetry.ActivitySource.StartActivity("OrderSubmission", ActivityKind.Server);
+        submissionSpan?.SetTag("exchange.symbol", cmd.Symbol);
+        submissionSpan?.SetTag("exchange.trader_id", cmd.TraderId);
+        submissionSpan?.SetTag("exchange.order_type", cmd.Type.ToString());
+        submissionSpan?.SetTag("exchange.side", cmd.Side.ToString());
+
         var symLock = _store.GetSymbolLock(cmd.Symbol);
         await symLock.WaitAsync(ct);
         try
@@ -45,7 +53,11 @@ public sealed class TradingCommandService
                 if (existing is not null)
                 {
                     var cached = JsonSerializer.Deserialize<OrderCommandResponse>(existing.ResponseJson);
-                    if (cached is not null) return cached with { IsDuplicateReplay = true };
+                    if (cached is not null)
+                    {
+                        submissionSpan?.SetTag("exchange.idempotent_replay", true);
+                        return cached with { IsDuplicateReplay = true };
+                    }
                 }
             }
 
@@ -53,14 +65,34 @@ public sealed class TradingCommandService
             var riskCheck = _risk.Validate(cmd, book.GetReferencePrice());
             if (!riskCheck.IsApproved)
             {
+                ExchangeTelemetry.OrdersSubmitted.Add(1,
+                    new KeyValuePair<string, object?>("symbol", cmd.Symbol),
+                    new KeyValuePair<string, object?>("status", "rejected"));
+
                 var rejected = new OrderRejected(Guid.NewGuid(), cmd.Symbol, book.LastSequenceNumber + 1, DateTime.UtcNow, cmd.TraderId, riskCheck.RuleCode!, riskCheck.Reason!);
                 var rejectedResponse = new OrderCommandResponse(false, riskCheck.RuleCode, riskCheck.Reason, new IExchangeEvent[] { rejected });
                 await SaveIdempotencyAsync(cmd, rejectedResponse, ct);
                 return rejectedResponse;
             }
 
-            var events = book.EvaluatePlaceOrder(cmd);
+            IReadOnlyList<IExchangeEvent> events;
+            using (var matchSpan = ExchangeTelemetry.ActivitySource.StartActivity("MatchingEngine", ActivityKind.Internal))
+            {
+                matchSpan?.SetTag("exchange.symbol", cmd.Symbol);
+                var sw = Stopwatch.StartNew();
+                events = book.EvaluatePlaceOrder(cmd);
+                sw.Stop();
+                double elapsedMs = sw.Elapsed.TotalMilliseconds;
+                matchSpan?.SetTag("exchange.matching_latency_ms", elapsedMs);
+                matchSpan?.SetTag("exchange.emitted_events", events.Count);
+                ExchangeTelemetry.MatchingLatencyMs.Record(elapsedMs, new KeyValuePair<string, object?>("symbol", cmd.Symbol));
+            }
+
             _risk.RecordOrderSubmitted(cmd);
+            ExchangeTelemetry.OrdersSubmitted.Add(1,
+                new KeyValuePair<string, object?>("symbol", cmd.Symbol),
+                new KeyValuePair<string, object?>("status", "accepted"));
+
             var response = new OrderCommandResponse(true, null, null, events);
 
             using (var scope = _scopeFactory.CreateScope())
@@ -69,7 +101,11 @@ public sealed class TradingCommandService
                 foreach (var evt in events)
                 {
                     book.Apply(evt);
-                    if (evt is TradeExecuted trade) _risk.RecordTradeFill(trade);
+                    if (evt is TradeExecuted trade)
+                    {
+                        _risk.RecordTradeFill(trade);
+                        ExchangeTelemetry.TradesExecuted.Add(1, new KeyValuePair<string, object?>("symbol", cmd.Symbol));
+                    }
 
                     db.Events.Add(new StoredExchangeEvent
                     {

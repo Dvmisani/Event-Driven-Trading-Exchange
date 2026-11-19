@@ -1,7 +1,11 @@
-﻿using TradingExchange.Api.Risk;
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using TradingExchange.Api.Hubs;
 using TradingExchange.Api.Infrastructure;
+using TradingExchange.Api.Observability;
+using TradingExchange.Api.Risk;
 using TradingExchange.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -21,18 +25,38 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+var otlpEndpoint = builder.Configuration["OTEL_EXPORTER_OTLP_ENDPOINT"];
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r.AddService(ExchangeTelemetry.ServiceName, serviceVersion: "1.0.0"))
+    .WithTracing(t =>
+    {
+        t.AddSource(ExchangeTelemetry.ActivitySourceName)
+         .AddAspNetCoreInstrumentation()
+         .AddHttpClientInstrumentation();
+
+        if (!string.IsNullOrWhiteSpace(otlpEndpoint))
+            t.AddOtlpExporter();
+    })
+    .WithMetrics(m =>
+    {
+        m.AddMeter(ExchangeTelemetry.MeterName)
+         .AddAspNetCoreInstrumentation()
+         .AddPrometheusExporter();
+    });
+
 var app = builder.Build();
 
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<ExchangeDbContext>();
-    for (var i = 0; i < 15; i++) { try { await db.Database.EnsureCreatedAsync(); break; } catch when (i < 14) { await Task.Delay(1000); } }
+    for (int i = 1; i <= 15; i++) { try { await db.Database.EnsureCreatedAsync(); break; } catch when (i < 15) { await Task.Delay(1000); } }
 }
 
 app.UseSwagger();
 app.UseSwaggerUI();
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.MapPrometheusScrapingEndpoint();
 app.MapControllers();
 app.MapHub<MarketDataHub>("/hubs/marketdata");
 app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "TradingExchange.Api" }));
@@ -40,6 +64,3 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "Trad
 app.Run();
 
 public partial class Program;
-
-
-

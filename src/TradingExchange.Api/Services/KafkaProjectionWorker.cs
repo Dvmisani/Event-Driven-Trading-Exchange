@@ -1,9 +1,12 @@
-﻿using System.Text.Json;
+﻿using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
 using Confluent.Kafka;
 using Microsoft.AspNetCore.SignalR;
 using TradingExchange.Api.Domain;
 using TradingExchange.Api.Hubs;
 using TradingExchange.Api.Infrastructure;
+using TradingExchange.Api.Observability;
 
 namespace TradingExchange.Api.Services;
 
@@ -47,6 +50,10 @@ public sealed class KafkaProjectionWorker(
                 continue;
             }
 
+            string? traceParent = null;
+            if (cr.Message.Headers is not null && cr.Message.Headers.TryGetLastBytes("traceparent", out var tpBytes))
+                traceParent = Encoding.UTF8.GetString(tpBytes);
+
             await ProcessRawMessageAsync(
                 cr.Topic,
                 cr.Partition.Value,
@@ -54,7 +61,8 @@ public sealed class KafkaProjectionWorker(
                 cr.Message.Key,
                 cr.Message.Value,
                 maxRetries,
-                stoppingToken);
+                stoppingToken,
+                traceParent);
 
             consumer.Commit(cr);
         }
@@ -69,8 +77,15 @@ public sealed class KafkaProjectionWorker(
         string? key,
         string rawValue,
         int maxRetries,
-        CancellationToken stoppingToken)
+        CancellationToken stoppingToken,
+        string? traceParent = null)
     {
+        ActivityContext.TryParse(traceParent, null, out var parentContext);
+        using var projSpan = ExchangeTelemetry.ActivitySource.StartActivity("ProjectionProcessing", ActivityKind.Consumer, parentContext);
+        projSpan?.SetTag("messaging.destination.name", topic);
+        projSpan?.SetTag("messaging.kafka.partition", partition);
+        projSpan?.SetTag("messaging.kafka.offset", offset);
+
         Exception? lastError = null;
         bool succeeded = false;
 
@@ -81,9 +96,18 @@ public sealed class KafkaProjectionWorker(
                 var evt = JsonSerializer.Deserialize<IExchangeEvent>(rawValue)
                     ?? throw new JsonException("Deserialized exchange event was null.");
 
-                using var scope = scopeFactory.CreateScope();
-                var db = scope.ServiceProvider.GetRequiredService<ExchangeDbContext>();
-                await ProjectionApplier.ApplyAsync(db, hub, evt, stoppingToken);
+                using (var broadcastSpan = ExchangeTelemetry.ActivitySource.StartActivity("SignalRBroadcast", ActivityKind.Producer))
+                {
+                    broadcastSpan?.SetTag("exchange.symbol", evt.Symbol);
+                    using var scope = scopeFactory.CreateScope();
+                    var db = scope.ServiceProvider.GetRequiredService<ExchangeDbContext>();
+                    await ProjectionApplier.ApplyAsync(db, hub, evt, stoppingToken);
+                }
+
+                double lagMs = Math.Max(0, (DateTime.UtcNow - evt.OccurredAtUtc).TotalMilliseconds);
+                ExchangeTelemetry.ProjectionLagMs.Record(lagMs, new KeyValuePair<string, object?>("symbol", evt.Symbol));
+                ExchangeTelemetry.KafkaMessagesConsumed.Add(1, new KeyValuePair<string, object?>("symbol", evt.Symbol));
+
                 succeeded = true;
                 break;
             }
