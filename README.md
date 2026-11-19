@@ -43,3 +43,16 @@ docker compose up --build
 # Run unit replay + end-to-end Testcontainers suite
 dotnet test --nologo --logger "console;verbosity=normal"
 ```
+
+## Kafka Partitioning & Fault-Tolerance Architecture
+
+All domain events are published to `exchange.events` using `Key = Symbol` (Murmur2 consistent hashing) with `Acks = All` and `EnableIdempotence = true`:
+
+```text
+AAPL   ──▶ Partition 1 ──▶ Strict FIFO per-symbol order lifecycle (OrderPlaced → OrderMatched → TradeExecuted)
+MSFT   ──▶ Partition 2 ──▶ Parallel horizontal throughput without cross-symbol lock contention
+BTCUSD ──▶ Partition 3 ──▶ Independent consumer scaling across partition groups
+```
+
+- **End-to-End Idempotency:** Command retries carrying `ClientRequestId` (or `X-Idempotency-Key`) return the cached response without duplicate matching, while `ProjectionApplier` deduplicates at-least-once Kafka deliveries by `EventId`.
+- **Dead Letter Queue (`exchange.events.deadletter`):** Poison or malformed messages failing bounded projection retries are routed to `exchange.events.deadletter` (and logged in SQL Server `/api/admin/deadletters`) before committing the partition offset so one bad payload never stalls an entire symbol stream.

@@ -11,6 +11,7 @@ var connStr = builder.Configuration.GetConnectionString("DefaultConnection")
 
 builder.Services.AddDbContext<ExchangeDbContext>(o => o.UseSqlServer(connStr));
 builder.Services.AddSingleton<IExchangeEventPublisher, KafkaEventPublisher>();
+builder.Services.AddSingleton<IDeadLetterPublisher, KafkaDeadLetterPublisher>();
 builder.Services.AddSingleton<OrderBookStore>();
 builder.Services.AddSingleton<RiskValidationService>();
 builder.Services.AddSingleton<TradingCommandService>();
@@ -39,5 +40,6 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "Trad
 app.Run();
 
 public partial class Program;
+
 
 

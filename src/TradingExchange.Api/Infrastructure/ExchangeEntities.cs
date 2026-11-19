@@ -63,3 +63,26 @@ public sealed class OrderBookSnapshotEntity
     public string SnapshotJson { get; set; } = string.Empty;
     public DateTime CreatedAtUtc { get; set; }
 }
+
+public sealed class IdempotencyRecordEntity
+{
+    public long Id { get; set; }
+    public string ClientRequestId { get; set; } = string.Empty;
+    public string Symbol { get; set; } = string.Empty;
+    public string ResponseJson { get; set; } = string.Empty;
+    public DateTime CreatedAtUtc { get; set; }
+}
+
+public sealed class DeadLetterRecordEntity
+{
+    public long Id { get; set; }
+    public string OriginalTopic { get; set; } = string.Empty;
+    public int Partition { get; set; }
+    public long Offset { get; set; }
+    public string? MessageKey { get; set; }
+    public string RawPayload { get; set; } = string.Empty;
+    public string ErrorType { get; set; } = string.Empty;
+    public string ErrorMessage { get; set; } = string.Empty;
+    public int AttemptCount { get; set; }
+    public DateTime FailedAtUtc { get; set; }
+}

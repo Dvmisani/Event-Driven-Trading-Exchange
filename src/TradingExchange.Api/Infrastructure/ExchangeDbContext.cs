@@ -10,6 +10,8 @@ public sealed class ExchangeDbContext(DbContextOptions<ExchangeDbContext> option
     public DbSet<OrderBookDepthReadModel> DepthLevels => Set<OrderBookDepthReadModel>();
     public DbSet<ProcessedProjectionEvent> ProcessedEvents => Set<ProcessedProjectionEvent>();
     public DbSet<OrderBookSnapshotEntity> OrderBookSnapshots => Set<OrderBookSnapshotEntity>();
+    public DbSet<IdempotencyRecordEntity> IdempotencyRecords => Set<IdempotencyRecordEntity>();
+    public DbSet<DeadLetterRecordEntity> DeadLetters => Set<DeadLetterRecordEntity>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -19,6 +21,8 @@ public sealed class ExchangeDbContext(DbContextOptions<ExchangeDbContext> option
         b.Entity<TradeReadModel>().HasIndex(t => new { t.Symbol, t.ExecutedAtUtc });
         b.Entity<OrderBookDepthReadModel>().HasKey(d => new { d.Symbol, d.Side, d.Price });
         b.Entity<OrderBookSnapshotEntity>().HasIndex(s => new { s.Symbol, s.LastSequenceNumber });
+        b.Entity<IdempotencyRecordEntity>().HasIndex(i => i.ClientRequestId).IsUnique();
+        b.Entity<DeadLetterRecordEntity>().HasIndex(d => d.FailedAtUtc);
         foreach (var p in b.Model.GetEntityTypes().SelectMany(t => t.GetProperties()).Where(p => p.ClrType == typeof(decimal)))
         { p.SetPrecision(18); p.SetScale(4); }
     }
