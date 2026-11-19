@@ -13,46 +13,51 @@ Simplified institutional backend trading exchange modeled on **JSE**, **NASDAQ**
 
 ## System Architecture
 
-```text
-                   React Trading Terminal
-                              |
-                              v
-                     ASP.NET Core API
-                              |
-            +-----------------+-----------------+
-            v                                   v
-     Command Handlers                    Query Handlers
-            |                                   |
-            v                                   v
-     Matching Engine                       Read Models
-            |                                   ^
-            v                                   |
-     SQL Event Store                            |
-            |                                   |
-            v                                   |
-        Apache Kafka ---------> Projection Worker
-            |                                   |
-            +--------------> SignalR Hub -------+
-                                        |
-                                        v
-                                Connected Clients
+```mermaid
+flowchart TB
+    UI["React Trading Terminal"]
+    API["ASP.NET Core API"]
+
+    subgraph WRITE["Write Side (Commands)"]
+        direction TB
+        CH["Command Handlers"]
+        ME["Matching Engine<br/>price-time priority"]
+        ES[("SQL Server<br/>Event Store")]
+        CH --> ME --> ES
+    end
+
+    K{{"Apache Kafka<br/>exchange.events"}}
+
+    subgraph READ["Read Side (Queries)"]
+        direction TB
+        PW["Projection Worker"]
+        RM[("Read Models<br/>Orders, Trades, DepthLevels")]
+        QH["Query Handlers"]
+        PW --> RM
+        QH --> RM
+    end
+
+    HUB["SignalR Hub<br/>/hubs/marketdata"]
+
+    UI -->|"REST"| API
+    API -->|"commands"| CH
+    API -->|"queries"| QH
+    ES -->|"publish keyed by Symbol"| K
+    K --> PW
+    K --> HUB
+    HUB -.->|"WebSocket: OrderBookUpdated, TradeExecuted"| UI
+
+    classDef client fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef service fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
+    classDef store fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef bus fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    class UI client
+    class API,CH,ME,QH,PW,HUB service
+    class ES,RM store
+    class K bus
 ```
+
 ---
-
-## Why This Project Matters
-
-Trading platforms are fundamentally different from traditional CRUD applications.
-
-They must:
-
-- Execute trades deterministically
-- Maintain immutable audit history
-- Recover system state from events
-- Stream market data in real time
-- Scale independently across financial instruments
-- Provide complete traceability for compliance and analysis
-
-This project explores those engineering challenges using modern distributed systems patterns.
 
 ## Screenshots
 ### 1. Live Trading Terminal (React + SignalR)
