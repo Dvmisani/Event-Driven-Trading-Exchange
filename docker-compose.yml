@@ -28,12 +28,14 @@
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
 
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
+    image: kafbat/kafka-ui:latest
+    user: "0:0"
     depends_on: [kafka]
     ports: ["8085:8080"]
     environment:
       KAFKA_CLUSTERS_0_NAME: trading-exchange
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      DYNAMIC_CONFIG_ENABLED: "true"
 
   jaeger:
     image: jaegertracing/all-in-one:latest
@@ -73,3 +75,6 @@
       Kafka__Topic: "exchange.events"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://jaeger:4317"
       OTEL_SERVICE_NAME: "TradingExchange.Api"
+
+
+
