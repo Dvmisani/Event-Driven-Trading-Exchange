@@ -1,4 +1,5 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using TradingExchange.Api.Risk;
+using Microsoft.EntityFrameworkCore;
 using TradingExchange.Api.Hubs;
 using TradingExchange.Api.Infrastructure;
 using TradingExchange.Api.Services;
@@ -11,6 +12,7 @@ var connStr = builder.Configuration.GetConnectionString("DefaultConnection")
 builder.Services.AddDbContext<ExchangeDbContext>(o => o.UseSqlServer(connStr));
 builder.Services.AddSingleton<IExchangeEventPublisher, KafkaEventPublisher>();
 builder.Services.AddSingleton<OrderBookStore>();
+builder.Services.AddSingleton<RiskValidationService>();
 builder.Services.AddSingleton<TradingCommandService>();
 builder.Services.AddHostedService<KafkaProjectionWorker>();
 builder.Services.AddSignalR();
@@ -37,4 +39,5 @@ app.MapGet("/health", () => Results.Ok(new { status = "healthy", service = "Trad
 app.Run();
 
 public partial class Program;
+
 

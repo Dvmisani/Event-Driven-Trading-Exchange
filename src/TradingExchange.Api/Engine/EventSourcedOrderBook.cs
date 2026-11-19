@@ -2,149 +2,272 @@
 
 namespace TradingExchange.Api.Engine;
 
-public sealed class RestingOrder
+public sealed class EventSourcedOrderBook
 {
-    public required Guid OrderId { get; init; }
-    public required string TraderId { get; init; }
-    public required OrderSide Side { get; init; }
-    public required decimal Price { get; init; }
-    public required decimal OriginalQuantity { get; init; }
-    public decimal RemainingQuantity { get; set; }
-    public required long PlacedSequence { get; init; }
-}
+    private sealed class DescendingDecimalComparer : IComparer<decimal>
+    {
+        public int Compare(decimal x, decimal y) => y.CompareTo(x);
+    }
 
-public sealed class EventSourcedOrderBook(string symbol)
-{
-    private readonly Dictionary<Guid, RestingOrder> _orders = [];
-    private readonly SortedDictionary<decimal, List<RestingOrder>> _bids = new(Comparer<decimal>.Create((a, b) => b.CompareTo(a)));
-    private readonly SortedDictionary<decimal, List<RestingOrder>> _asks = new();
-    private readonly List<TradeExecuted> _trades = [];
+    private readonly SortedDictionary<decimal, Queue<RestingOrderState>> _bids = new(new DescendingDecimalComparer());
+    private readonly SortedDictionary<decimal, Queue<RestingOrderState>> _asks = new();
+    private readonly List<RestingOrderState> _stopOrders = new();
+    private readonly Dictionary<Guid, RestingOrderState> _activeOrders = new();
 
-    public string Symbol { get; } = symbol.ToUpperInvariant();
+    public string Symbol { get; }
     public long LastSequenceNumber { get; private set; }
-    public IReadOnlyList<TradeExecuted> RecentTrades => _trades;
+    public decimal? LastTradePrice { get; private set; }
+
+    public EventSourcedOrderBook(string symbol) => Symbol = symbol;
+
+    public decimal? GetReferencePrice()
+    {
+        if (LastTradePrice.HasValue) return LastTradePrice.Value;
+        decimal? bestBid = _bids.Count > 0 ? _bids.Keys.First() : null;
+        decimal? bestAsk = _asks.Count > 0 ? _asks.Keys.First() : null;
+        if (bestBid.HasValue && bestAsk.HasValue) return (bestBid.Value + bestAsk.Value) / 2m;
+        return bestBid ?? bestAsk;
+    }
+
+    public OrderBookSnapshotState CreateSnapshot()
+    {
+        var resting = _bids.Values.SelectMany(q => q)
+            .Concat(_asks.Values.SelectMany(q => q))
+            .OrderBy(o => o.SequencePriority)
+            .ToList();
+        return new OrderBookSnapshotState(Symbol, LastSequenceNumber, LastTradePrice, DateTime.UtcNow, resting, _stopOrders.ToList());
+    }
+
+    public void LoadFromSnapshot(OrderBookSnapshotState snapshot)
+    {
+        _bids.Clear();
+        _asks.Clear();
+        _stopOrders.Clear();
+        _activeOrders.Clear();
+        LastSequenceNumber = snapshot.LastSequenceNumber;
+        LastTradePrice = snapshot.LastTradePrice;
+
+        foreach (var o in snapshot.RestingOrders.OrderBy(x => x.SequencePriority))
+            AddResting(o);
+        foreach (var s in snapshot.StopOrders.OrderBy(x => x.SequencePriority))
+        {
+            _stopOrders.Add(s);
+            _activeOrders[s.OrderId] = s;
+        }
+    }
+
+    public void Apply(IExchangeEvent evt)
+    {
+        LastSequenceNumber = Math.Max(LastSequenceNumber, evt.SequenceNumber);
+        switch (evt)
+        {
+            case OrderPlaced p when p.Type == OrderType.Stop:
+                var stop = new RestingOrderState(p.OrderId, p.TraderId, p.Side, p.Price, p.Quantity, p.SequenceNumber, OrderType.Stop, p.StopPrice);
+                _stopOrders.Add(stop);
+                _activeOrders[p.OrderId] = stop;
+                break;
+            case OrderPlaced p:
+                AddResting(new RestingOrderState(p.OrderId, p.TraderId, p.Side, p.Price, p.Quantity, p.SequenceNumber, p.Type, p.StopPrice));
+                break;
+            case StopOrderTriggered t:
+                var idx = _stopOrders.FindIndex(x => x.OrderId == t.OrderId);
+                if (idx >= 0) _stopOrders.RemoveAt(idx);
+                break;
+            case OrderMatched m:
+                if (_activeOrders.TryGetValue(m.MakerOrderId, out var maker))
+                    UpdateOrderQuantity(m.MakerOrderId, maker.RemainingQuantity - m.MatchedQuantity);
+                if (_activeOrders.TryGetValue(m.TakerOrderId, out var taker))
+                    UpdateOrderQuantity(m.TakerOrderId, taker.RemainingQuantity - m.MatchedQuantity);
+                break;
+            case TradeExecuted tr:
+                LastTradePrice = tr.Price;
+                break;
+            case OrderCancelled c:
+                RemoveOrder(c.OrderId);
+                break;
+        }
+    }
 
     public IReadOnlyList<IExchangeEvent> EvaluatePlaceOrder(PlaceOrderCommand cmd)
     {
-        if (cmd.Price <= 0) throw new ArgumentException("Price must be positive.");
-        if (cmd.Quantity <= 0) throw new ArgumentException("Quantity must be positive.");
-
         var events = new List<IExchangeEvent>();
+        var consumed = new Dictionary<Guid, decimal>();
+        var triggeredStops = new HashSet<Guid>();
         long seq = LastSequenceNumber;
-        var now = DateTimeOffset.UtcNow;
+        var now = DateTime.UtcNow;
         var orderId = Guid.NewGuid();
 
-        events.Add(new OrderPlaced(Guid.NewGuid(), Symbol, ++seq, now, orderId, cmd.TraderId, cmd.Side, cmd.Price, cmd.Quantity));
+        events.Add(new OrderPlaced(Guid.NewGuid(), Symbol, ++seq, now, orderId, cmd.TraderId, cmd.Side, cmd.Price, cmd.Quantity, cmd.Type, cmd.StopPrice));
 
-        decimal remaining = cmd.Quantity;
-        var oppositeBook = cmd.Side == OrderSide.Buy ? _asks : _bids;
-
-        foreach (var (bookPrice, queue) in oppositeBook)
+        if (cmd.Type == OrderType.Stop)
         {
-            bool crosses = cmd.Side == OrderSide.Buy ? bookPrice <= cmd.Price : bookPrice >= cmd.Price;
+            decimal trigger = cmd.StopPrice ?? cmd.Price;
+            if (LastTradePrice.HasValue && IsStopTriggered(cmd.Side, trigger, LastTradePrice.Value))
+            {
+                triggeredStops.Add(orderId);
+                events.Add(new StopOrderTriggered(Guid.NewGuid(), Symbol, ++seq, now, orderId, trigger, LastTradePrice.Value));
+                ExecuteAggressive(orderId, cmd.TraderId, cmd.Side, OrderType.Market, cmd.Price, cmd.Quantity, now, ref seq, events, consumed, triggeredStops);
+            }
+            return events;
+        }
+
+        if (cmd.Type == OrderType.FOK && !HasFullFillLiquidity(cmd.Side, cmd.Price, cmd.Quantity, consumed))
+        {
+            events.Add(new OrderCancelled(Guid.NewGuid(), Symbol, ++seq, now, orderId, cmd.Quantity, "FOK_INSUFFICIENT_LIQUIDITY"));
+            return events;
+        }
+
+        ExecuteAggressive(orderId, cmd.TraderId, cmd.Side, cmd.Type, cmd.Price, cmd.Quantity, now, ref seq, events, consumed, triggeredStops);
+        return events;
+    }
+
+    public IReadOnlyList<IExchangeEvent> EvaluateCancelOrder(Guid orderId)
+    {
+        if (!_activeOrders.TryGetValue(orderId, out var existing)) return Array.Empty<IExchangeEvent>();
+        return new IExchangeEvent[] { new OrderCancelled(Guid.NewGuid(), Symbol, LastSequenceNumber + 1, DateTime.UtcNow, orderId, existing.RemainingQuantity, "USER_CANCELLED") };
+    }
+
+    private void ExecuteAggressive(
+        Guid takerId,
+        string takerTrader,
+        OrderSide side,
+        OrderType type,
+        decimal limitPrice,
+        decimal qty,
+        DateTime now,
+        ref long seq,
+        List<IExchangeEvent> events,
+        Dictionary<Guid, decimal> consumed,
+        HashSet<Guid> triggeredStops)
+    {
+        decimal remaining = qty;
+        decimal effectiveLimit = type == OrderType.Market ? (side == OrderSide.Buy ? decimal.MaxValue : 0m) : limitPrice;
+        var opposingBook = side == OrderSide.Buy ? _asks : _bids;
+        var matchedPrices = new List<decimal>();
+
+        foreach (var (bookPrice, queue) in opposingBook)
+        {
+            bool crosses = side == OrderSide.Buy ? bookPrice <= effectiveLimit : bookPrice >= effectiveLimit;
             if (!crosses || remaining <= 0) break;
 
             foreach (var maker in queue)
             {
                 if (remaining <= 0) break;
-                if (maker.RemainingQuantity <= 0) continue;
+                decimal alreadyUsed = consumed.GetValueOrDefault(maker.OrderId, 0m);
+                decimal available = maker.RemainingQuantity - alreadyUsed;
+                if (available <= 0) continue;
 
-                decimal fillQty = Math.Min(remaining, maker.RemainingQuantity);
-                remaining -= fillQty;
+                decimal fill = Math.Min(remaining, available);
+                remaining -= fill;
+                consumed[maker.OrderId] = alreadyUsed + fill;
 
-                events.Add(new OrderMatched(Guid.NewGuid(), Symbol, ++seq, now, maker.OrderId, orderId, maker.Price, fillQty));
+                events.Add(new OrderMatched(Guid.NewGuid(), Symbol, ++seq, now, maker.OrderId, takerId, fill, bookPrice));
 
-                var (buyId, sellId, buyer, seller) = cmd.Side == OrderSide.Buy
-                    ? (orderId, maker.OrderId, cmd.TraderId, maker.TraderId)
-                    : (maker.OrderId, orderId, maker.TraderId, cmd.TraderId);
+                var (buyId, buyer, sellId, seller) = side == OrderSide.Buy
+                    ? (takerId, takerTrader, maker.OrderId, maker.TraderId)
+                    : (maker.OrderId, maker.TraderId, takerId, takerTrader);
 
-                events.Add(new TradeExecuted(Guid.NewGuid(), Symbol, ++seq, now, Guid.NewGuid(), buyId, sellId, buyer, seller, maker.Price, fillQty));
+                events.Add(new TradeExecuted(Guid.NewGuid(), Symbol, ++seq, now, Guid.NewGuid(), buyId, buyer, sellId, seller, bookPrice, fill));
+                matchedPrices.Add(bookPrice);
             }
         }
 
-        return events;
-    }
-
-    public IReadOnlyList<IExchangeEvent> EvaluateCancelOrder(CancelOrderCommand cmd)
-    {
-        if (!_orders.TryGetValue(cmd.OrderId, out var order) || order.RemainingQuantity <= 0)
-            throw new InvalidOperationException($"Active order {cmd.OrderId} not found.");
-
-        if (!string.Equals(order.TraderId, cmd.TraderId, StringComparison.OrdinalIgnoreCase))
-            throw new UnauthorizedAccessException("Trader does not own this order.");
-
-        long seq = LastSequenceNumber + 1;
-        return [new OrderCancelled(Guid.NewGuid(), Symbol, seq, DateTimeOffset.UtcNow, order.OrderId, order.TraderId, order.RemainingQuantity)];
-    }
-
-    public void Apply(IExchangeEvent evt)
-    {
-        LastSequenceNumber = evt.SequenceNumber;
-
-        switch (evt)
+        if (remaining > 0 && type is OrderType.IOC or OrderType.Market)
         {
-            case OrderPlaced p:
-                var resting = new RestingOrder
-                {
-                    OrderId = p.OrderId,
-                    TraderId = p.TraderId,
-                    Side = p.Side,
-                    Price = p.Price,
-                    OriginalQuantity = p.Quantity,
-                    RemainingQuantity = p.Quantity,
-                    PlacedSequence = p.SequenceNumber
-                };
-                _orders[p.OrderId] = resting;
-                AddToBook(resting);
-                break;
+            string reason = type == OrderType.IOC ? "IOC_UNFILLED_REMAINDER" : "MARKET_NO_REMAINING_LIQUIDITY";
+            events.Add(new OrderCancelled(Guid.NewGuid(), Symbol, ++seq, now, takerId, remaining, reason));
+        }
 
-            case OrderMatched m:
-                ReduceOrder(m.MakerOrderId, m.MatchedQuantity);
-                ReduceOrder(m.TakerOrderId, m.MatchedQuantity);
-                break;
+        foreach (var tradePrice in matchedPrices.Distinct())
+            EvaluateTriggeredStops(tradePrice, now, ref seq, events, consumed, triggeredStops);
+    }
 
-            case TradeExecuted t:
-                _trades.Add(t);
-                if (_trades.Count > 100) _trades.RemoveAt(0);
-                break;
+    private void EvaluateTriggeredStops(
+        decimal tradePrice,
+        DateTime now,
+        ref long seq,
+        List<IExchangeEvent> events,
+        Dictionary<Guid, decimal> consumed,
+        HashSet<Guid> triggeredStops)
+    {
+        var triggered = _stopOrders
+            .Where(s => !triggeredStops.Contains(s.OrderId) && IsStopTriggered(s.Side, s.StopPrice ?? s.Price, tradePrice))
+            .OrderBy(s => s.SequencePriority)
+            .ToList();
 
-            case OrderCancelled c:
-                ReduceOrder(c.OrderId, c.RemainingQuantity);
-                break;
+        foreach (var s in triggered)
+        {
+            triggeredStops.Add(s.OrderId);
+            events.Add(new StopOrderTriggered(Guid.NewGuid(), Symbol, ++seq, now, s.OrderId, s.StopPrice ?? s.Price, tradePrice));
+            ExecuteAggressive(s.OrderId, s.TraderId, s.Side, OrderType.Market, s.Price, s.RemainingQuantity, now, ref seq, events, consumed, triggeredStops);
         }
     }
 
-    public OrderBookSnapshot GetSnapshot()
+    private static bool IsStopTriggered(OrderSide side, decimal stopPrice, decimal marketPrice)
+        => side == OrderSide.Buy ? marketPrice >= stopPrice : marketPrice <= stopPrice;
+
+    private bool HasFullFillLiquidity(OrderSide side, decimal limitPrice, decimal requiredQty, Dictionary<Guid, decimal> consumed)
+    {
+        decimal available = 0m;
+        var opposingBook = side == OrderSide.Buy ? _asks : _bids;
+        foreach (var (bookPrice, queue) in opposingBook)
+        {
+            bool crosses = side == OrderSide.Buy ? bookPrice <= limitPrice : bookPrice >= limitPrice;
+            if (!crosses) break;
+            available += queue.Sum(o => Math.Max(0m, o.RemainingQuantity - consumed.GetValueOrDefault(o.OrderId, 0m)));
+            if (available >= requiredQty) return true;
+        }
+        return false;
+    }
+
+    public OrderBookSnapshot ToSnapshotDto()
     {
         var bids = _bids.Select(kv => new OrderBookLevel(kv.Key, kv.Value.Sum(o => o.RemainingQuantity), kv.Value.Count)).ToList();
         var asks = _asks.Select(kv => new OrderBookLevel(kv.Key, kv.Value.Sum(o => o.RemainingQuantity), kv.Value.Count)).ToList();
-        return new OrderBookSnapshot(Symbol, LastSequenceNumber, bids, asks);
+        return new OrderBookSnapshot(Symbol, LastSequenceNumber, bids, asks, DateTime.UtcNow, LastTradePrice);
     }
 
-    private void AddToBook(RestingOrder order)
+    private void AddResting(RestingOrderState order)
     {
         var book = order.Side == OrderSide.Buy ? _bids : _asks;
-        if (!book.TryGetValue(order.Price, out var list))
+        if (!book.TryGetValue(order.Price, out var q))
         {
-            list = [];
-            book[order.Price] = list;
+            q = new Queue<RestingOrderState>();
+            book[order.Price] = q;
         }
-        list.Add(order);
+        q.Enqueue(order);
+        _activeOrders[order.OrderId] = order;
     }
 
-    private void ReduceOrder(Guid orderId, decimal qty)
+    private void UpdateOrderQuantity(Guid orderId, decimal remaining)
     {
-        if (!_orders.TryGetValue(orderId, out var order)) return;
-        order.RemainingQuantity -= qty;
-        if (order.RemainingQuantity <= 0)
+        if (!_activeOrders.TryGetValue(orderId, out var existing)) return;
+        if (remaining <= 0) { RemoveOrder(orderId); return; }
+
+        var updated = existing with { RemainingQuantity = remaining };
+        _activeOrders[orderId] = updated;
+        var book = existing.Side == OrderSide.Buy ? _bids : _asks;
+        if (book.TryGetValue(existing.Price, out var q))
         {
-            order.RemainingQuantity = 0;
-            var book = order.Side == OrderSide.Buy ? _bids : _asks;
-            if (book.TryGetValue(order.Price, out var list))
-            {
-                list.Remove(order);
-                if (list.Count == 0) book.Remove(order.Price);
-            }
+            var items = q.Select(o => o.OrderId == orderId ? updated : o).ToList();
+            q.Clear();
+            foreach (var item in items) q.Enqueue(item);
+        }
+    }
+
+    private void RemoveOrder(Guid orderId)
+    {
+        if (!_activeOrders.Remove(orderId, out var existing)) return;
+        var stopIdx = _stopOrders.FindIndex(x => x.OrderId == orderId);
+        if (stopIdx >= 0) _stopOrders.RemoveAt(stopIdx);
+
+        var book = existing.Side == OrderSide.Buy ? _bids : _asks;
+        if (book.TryGetValue(existing.Price, out var q))
+        {
+            var items = q.Where(o => o.OrderId != orderId).ToList();
+            q.Clear();
+            foreach (var item in items) q.Enqueue(item);
+            if (q.Count == 0) book.Remove(existing.Price);
         }
     }
 }

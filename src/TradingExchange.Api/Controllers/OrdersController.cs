@@ -1,37 +1,53 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using TradingExchange.Api.Domain;
+using TradingExchange.Api.Risk;
 using TradingExchange.Api.Services;
 
 namespace TradingExchange.Api.Controllers;
 
 [ApiController]
-[Route("api/orders")]
-public sealed class OrdersController(TradingCommandService commands, OrderBookStore store) : ControllerBase
+[Route("api")]
+public sealed class OrdersController : ControllerBase
 {
-    [HttpPost]
+    private readonly TradingCommandService _commands;
+    private readonly OrderBookStore _store;
+    private readonly RiskValidationService _risk;
+
+    public OrdersController(TradingCommandService commands, OrderBookStore store, RiskValidationService risk)
+    {
+        _commands = commands;
+        _store = store;
+        _risk = risk;
+    }
+
+    [HttpPost("orders")]
     public async Task<IActionResult> PlaceOrder([FromBody] PlaceOrderCommand cmd, CancellationToken ct)
     {
-        var events = await commands.PlaceOrderAsync(cmd, ct);
-        var placed = events.OfType<OrderPlaced>().First();
-        return Created($"/api/marketdata/{placed.Symbol}/orders/{placed.OrderId}", new
-        {
-            placed.OrderId,
-            placed.Symbol,
-            EmittedEvents = events.Select(e => new { Type = e.GetType().Name, e.SequenceNumber, Event = e })
-        });
+        var result = await _commands.PlaceOrderAsync(cmd, ct);
+        if (!result.Accepted)
+            return UnprocessableEntity(new { accepted = false, rule = result.RejectionRule, reason = result.RejectionReason, events = result.Events });
+        return Ok(result.Events);
     }
 
-    [HttpDelete("{symbol}/{orderId:guid}")]
-    public async Task<IActionResult> CancelOrder(string symbol, Guid orderId, [FromQuery] string traderId, CancellationToken ct)
+    [HttpDelete("orders/{symbol}/{orderId:guid}")]
+    public async Task<IActionResult> CancelOrder(string symbol, Guid orderId, CancellationToken ct)
+        => Ok(await _commands.CancelOrderAsync(symbol, orderId, ct));
+
+    [HttpPost("admin/rebuild/{symbol}")]
+    public async Task<IActionResult> Rebuild(string symbol, CancellationToken ct)
     {
-        var events = await commands.CancelOrderAsync(new CancelOrderCommand(symbol, orderId, traderId), ct);
-        return Ok(new { OrderId = orderId, EmittedEvents = events });
+        var (book, replayed, snapSeq) = await _store.RebuildFromStoreAsync(symbol, ct);
+        return Ok(new { symbol, snapshotSequence = snapSeq, replayedTailEvents = replayed, orderBook = book.ToSnapshotDto() });
     }
 
-    [HttpPost("/api/admin/rebuild/{symbol}")]
-    public async Task<IActionResult> RebuildFromEvents(string symbol, CancellationToken ct)
+    [HttpPost("admin/snapshot/{symbol}")]
+    public async Task<IActionResult> ForceSnapshot(string symbol, CancellationToken ct)
     {
-        var rebuilt = await store.GetOrHydrateAsync(symbol, forceRebuild: true, ct);
-        return Ok(new { Message = "Rebuilt order book state purely from SQL Server event log.", Snapshot = rebuilt.GetSnapshot() });
+        var book = await _store.GetOrLoadAsync(symbol, ct);
+        await _store.SaveSnapshotIfDueAsync(symbol, book, force: true, ct);
+        return Ok(new { symbol, snapshotSequence = book.LastSequenceNumber });
     }
+
+    [HttpGet("risk/{traderId}")]
+    public IActionResult GetTraderRisk(string traderId) => Ok(_risk.GetProfile(traderId));
 }

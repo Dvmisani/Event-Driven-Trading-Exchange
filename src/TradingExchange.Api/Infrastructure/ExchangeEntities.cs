@@ -54,3 +54,12 @@ public sealed class ProcessedProjectionEvent
     [Key] public Guid EventId { get; set; }
     public DateTimeOffset ProcessedAtUtc { get; set; }
 }
+
+public sealed class OrderBookSnapshotEntity
+{
+    public long Id { get; set; }
+    public string Symbol { get; set; } = string.Empty;
+    public long LastSequenceNumber { get; set; }
+    public string SnapshotJson { get; set; } = string.Empty;
+    public DateTime CreatedAtUtc { get; set; }
+}
