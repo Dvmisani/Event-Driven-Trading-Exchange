@@ -73,3 +73,8 @@ Measured locally using **NBomber** on **Intel(R) Core(TM) i5-10310U CPU @ 1.70GH
 | **Matching Engine Latency** | `< 5.00 ms` | **0.14 ms** (p99: `0.38 ms`) | `0.00 ms` p50 | PASS |
 | **Event Stream Replay Speed** | `100,000+ events/sec` | **1,924,082 events/sec** (250,000 events in `129.9 ms`) | `0.52 Âµs/event` | PASS |
 | **SignalR Market Data Broadcasts** | `1,000+ broadcasts/sec` | **891,297 broadcasts/sec** | `0.02 ms` / `0.02 ms` | PASS |
+
+## Azure Cloud Architecture (Phase 5) & Live React Trading UI (Phase 6)
+
+- **Azure Bicep IaC (`infra/main.bicep`) & CI/CD (`.github/workflows/deploy-azure.yml`):** Provisions **Azure Container Apps**, **Azure Container Registry**, **Azure SQL Database**, **Azure Event Hubs for Kafka** (`SaslSsl` over port `9093`), and **Azure Application Insights** in `southafricanorth`.
+- **Live React + SignalR Trading Terminal (`/`):** Served directly by ASP.NET Core static files at `http://localhost:5080/`, streaming live L2 market depth (`OrderBookUpdated`) and trade executions (`TradeExecuted`) over WebSockets (`/hubs/marketdata`) with Limit, Market, Stop, IOC, and FOK order entry.

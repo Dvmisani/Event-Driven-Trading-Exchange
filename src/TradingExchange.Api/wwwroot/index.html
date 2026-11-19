@@ -1,52 +1,280 @@
 ﻿<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>Event-Driven Trading Exchange | JSE / NASDAQ / Binance Engine</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Event-Driven Institutional Trading Exchange</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.7/signalr.min.js"></script>
-  <style>
-    body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; margin: 1.5rem; }
-    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin-top: 1rem; }
-    .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 1rem; }
-    input, select, button { padding: 0.45rem; border-radius: 4px; border: 1px solid #475569; background: #0f172a; color: #f8fafc; }
-    button { background: #2563eb; border: none; cursor: pointer; font-weight: 600; }
-    .bid { color: #4ade80; } .ask { color: #f87171; }
-  </style>
 </head>
-<body>
-  <h2>Event-Driven Trading Exchange (.NET 10 &bull; Kafka &bull; SQL Server &bull; SignalR)</h2>
-  <div>
-    Symbol: <input id="sym" value="JSE:NPN" />
-    Trader: <input id="trader" value="trader-alpha" />
-    Side: <select id="side"><option>Buy</option><option>Sell</option></select>
-    Price: <input id="price" type="number" value="102" />
-    Qty: <input id="qty" type="number" value="100" />
-    <button onclick="placeOrder()">Submit Order</button>
-    <a href="/swagger" style="color:#38bdf8;margin-left:1rem;">Swagger API</a>
-  </div>
-  <div class="grid">
-    <div class="card"><h3>Order Book Depth</h3><div id="book">Waiting for events...</div></div>
-    <div class="card"><h3>Live Trade Tape (SignalR)</h3><ul id="trades"></ul></div>
-    <div class="card"><h3>Emitted Domain Events</h3><pre id="evts" style="white-space:pre-wrap;font-size:0.8rem;"></pre></div>
-  </div>
-  <script>
-    const conn = new signalR.HubConnectionBuilder().withUrl("/hubs/marketdata").withAutomaticReconnect().build();
-    conn.on("OrderBookUpdated", snap => {
-      const asks = [...snap.asks].reverse().map(a => `<div class="ask">ASK ${a.totalQuantity} @ R${a.price} (${a.orderCount})</div>`).join("");
-      const bids = snap.bids.map(b => `<div class="bid">BID ${b.totalQuantity} @ R${b.price} (${b.orderCount})</div>`).join("");
-      document.getElementById("book").innerHTML = `${asks}<hr/>${bids || "Empty"}`;
-    });
-    conn.on("TradeExecuted", t => {
-      const li = document.createElement("li");
-      li.textContent = `${t.symbol}: ${t.quantity} @ R${t.price} (${t.buyerTraderId} <- ${t.sellerTraderId})`;
-      document.getElementById("trades").prepend(li);
-    });
-    conn.start().then(() => conn.invoke("SubscribeSymbol", document.getElementById("sym").value));
-    async function placeOrder() {
-      const body = { symbol: sym.value, traderId: trader.value, side: side.value, price: +price.value, quantity: +qty.value };
-      const res = await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      document.getElementById("evts").textContent = JSON.stringify(await res.json(), null, 2);
+<body class="bg-slate-950 text-slate-100 font-sans antialiased">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    function TradingTerminal() {
+      const [symbol, setSymbol] = useState("JSE:NPN");
+      const [traderId, setTraderId] = useState("desk-alpha-01");
+      const [orderType, setOrderType] = useState("Limit");
+      const [price, setPrice] = useState("100.00");
+      const [stopPrice, setStopPrice] = useState("102.00");
+      const [quantity, setQuantity] = useState("25");
+      const [bids, setBids] = useState([]);
+      const [asks, setAsks] = useState([]);
+      const [trades, setTrades] = useState([]);
+      const [seq, setSeq] = useState(0);
+      const [connected, setConnected] = useState(false);
+      const [banner, setBanner] = useState(null);
+      const connRef = useRef(null);
+
+      const loadInitial = async (sym) => {
+        try {
+          const [obRes, trRes] = await Promise.all([
+            fetch(`/api/marketdata/${encodeURIComponent(sym)}/orderbook`),
+            fetch(`/api/marketdata/${encodeURIComponent(sym)}/trades`)
+          ]);
+          if (obRes.ok) {
+            const ob = await obRes.json();
+            setBids(ob.bids || []);
+            setAsks(ob.asks || []);
+            setSeq(ob.sequenceNumber || 0);
+          }
+          if (trRes.ok) {
+            const tr = await trRes.json();
+            setTrades(tr || []);
+          }
+        } catch (err) { console.error(err); }
+      };
+
+      useEffect(() => {
+        loadInitial(symbol);
+
+        const connection = new signalR.HubConnectionBuilder()
+          .withUrl("/hubs/marketdata")
+          .withAutomaticReconnect()
+          .build();
+
+        connection.on("OrderBookUpdated", (snapshot) => {
+          if (snapshot.symbol === symbol) {
+            setBids(snapshot.bids || []);
+            setAsks(snapshot.asks || []);
+            setSeq(snapshot.sequenceNumber || 0);
+          }
+        });
+
+        connection.on("TradeExecuted", (trade) => {
+          if (trade.symbol === symbol) {
+            setTrades((prev) => [{
+              tradeId: trade.tradeId,
+              price: trade.price,
+              quantity: trade.quantity,
+              buyerTraderId: trade.buyerTraderId,
+              sellerTraderId: trade.sellerTraderId,
+              executedAtUtc: trade.occurredAtUtc
+            }, ...prev].slice(0, 30));
+          }
+        });
+
+        connection.start()
+          .then(() => {
+            setConnected(true);
+            return connection.invoke("SubscribeSymbol", symbol);
+          })
+          .catch(() => setConnected(false));
+
+        connRef.current = connection;
+        return () => { connection.stop(); };
+      }, [symbol]);
+
+      const submitOrder = async (side) => {
+        setBanner(null);
+        const payload = {
+          symbol,
+          traderId,
+          side,
+          price: orderType === "Market" ? 0 : parseFloat(price),
+          quantity: parseFloat(quantity),
+          type: orderType,
+          stopPrice: orderType === "Stop" ? parseFloat(stopPrice) : null,
+          clientRequestId: `ui-${crypto.randomUUID()}`
+        };
+
+        const res = await fetch("/api/orders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setBanner({ ok: false, text: `Rejected [${data.rule}]: ${data.reason}` });
+        } else {
+          setBanner({ ok: true, text: `${side} ${quantity} ${symbol} (${orderType}) committed — ${data.length} event(s) emitted` });
+        }
+      };
+
+      const seedLiquidity = async () => {
+        const base = parseFloat(price) || 100;
+        const orders = [
+          { symbol, traderId: "mm-citadel", side: "Buy", price: +(base - 2).toFixed(2), quantity: 100, type: "Limit" },
+          { symbol, traderId: "mm-jane", side: "Buy", price: +(base - 1).toFixed(2), quantity: 75, type: "Limit" },
+          { symbol, traderId: "mm-virtu", side: "Sell", price: +(base + 1).toFixed(2), quantity: 75, type: "Limit" },
+          { symbol, traderId: "mm-optiver", side: "Sell", price: +(base + 2).toFixed(2), quantity: 100, type: "Limit" }
+        ];
+        for (const o of orders) {
+          await fetch("/api/orders", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) });
+        }
+        setBanner({ ok: true, text: `Seeded 4 market-maker L2 liquidity levels around ${base.toFixed(2)}` });
+      };
+
+      const maxQty = Math.max(1, ...bids.map(b => b.totalQuantity), ...asks.map(a => a.totalQuantity));
+
+      return (
+        <div className="max-w-7xl mx-auto p-6 space-y-6">
+          <header className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight text-white">Event-Driven Institutional Exchange</h1>
+              <p className="text-xs text-slate-400">.NET 10 • Price-Time Priority • Event Sourcing • Apache Kafka • SignalR WebSockets</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className={`px-3 py-1 rounded-full text-xs font-semibold ${connected ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40" : "bg-rose-500/20 text-rose-300"}`}>
+                {connected ? "● SignalR Live" : "○ Disconnected"}
+              </span>
+              <span className="px-3 py-1 rounded bg-slate-900 border border-slate-800 text-xs font-mono text-slate-300">
+                Seq #{seq}
+              </span>
+              <select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-sm font-semibold">
+                <option value="JSE:NPN">JSE:NPN (Naspers)</option>
+                <option value="AAPL">NASDAQ:AAPL</option>
+                <option value="MSFT">NASDAQ:MSFT</option>
+                <option value="BTCUSD">CRYPTO:BTCUSD</option>
+              </select>
+            </div>
+          </header>
+
+          {banner && (
+            <div className={`p-3 rounded-lg text-sm border ${banner.ok ? "bg-emerald-950/60 border-emerald-700 text-emerald-200" : "bg-rose-950/60 border-rose-700 text-rose-200"}`}>
+              {banner.text}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* Order Entry Ticket */}
+            <section className="lg:col-span-4 bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="font-semibold text-slate-200">Order Entry Ticket</h2>
+                <button onClick={seedLiquidity} className="text-xs px-2.5 py-1 rounded bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/40">
+                  + Seed L2 Book
+                </button>
+              </div>
+
+              <div className="space-y-3 text-sm">
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Trader Desk ID</label>
+                  <input value={traderId} onChange={(e) => setTraderId(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 font-mono" />
+                </div>
+
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Order Type</label>
+                  <select value={orderType} onChange={(e) => setOrderType(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2">
+                    <option value="Limit">Limit (Price-Time FIFO)</option>
+                    <option value="Market">Market (Sweep Best Liquidity)</option>
+                    <option value="Stop">Stop (Trigger on Market Price)</option>
+                    <option value="IOC">IOC (Immediate Or Cancel)</option>
+                    <option value="FOK">FOK (Fill Or Kill)</option>
+                  </select>
+                </div>
+
+                {orderType !== "Market" && (
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Limit Price</label>
+                    <input type="number" step="0.01" value={price} onChange={(e) => setPrice(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 font-mono" />
+                  </div>
+                )}
+
+                {orderType === "Stop" && (
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Stop Trigger Price</label>
+                    <input type="number" step="0.01" value={stopPrice} onChange={(e) => setStopPrice(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 font-mono" />
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Quantity</label>
+                  <input type="number" step="1" value={quantity} onChange={(e) => setQuantity(e.target.value)} className="w-full bg-slate-950 border border-slate-700 rounded px-3 py-2 font-mono" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 pt-2">
+                <button onClick={() => submitOrder("Buy")} className="py-2.5 rounded-lg font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/50 transition">
+                  BUY {symbol}
+                </button>
+                <button onClick={() => submitOrder("Sell")} className="py-2.5 rounded-lg font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-950/50 transition">
+                  SELL {symbol}
+                </button>
+              </div>
+            </section>
+
+            {/* L2 Market Depth */}
+            <section className="lg:col-span-4 bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-4">
+              <h2 className="font-semibold text-slate-200">L2 Market Depth ({symbol})</h2>
+
+              <div>
+                <div className="text-xs font-semibold uppercase tracking-wider text-rose-400 mb-1.5">Asks (Sellers)</div>
+                <div className="space-y-1 font-mono text-xs">
+                  {asks.length === 0 && <div className="text-slate-500 py-2">No resting asks</div>}
+                  {[...asks].reverse().map((lvl) => (
+                    <div key={lvl.price} className="relative flex justify-between px-2.5 py-1.5 rounded bg-slate-950/80 overflow-hidden">
+                      <div className="absolute inset-y-0 right-0 bg-rose-500/15" style={{ width: `${Math.min(100, (lvl.totalQuantity / maxQty) * 100)}%` }} />
+                      <span className="relative text-rose-400 font-semibold">{Number(lvl.price).toFixed(2)}</span>
+                      <span className="relative text-slate-200">{lvl.totalQuantity} ({lvl.orderCount})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="border-t border-slate-800 pt-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-emerald-400 mb-1.5">Bids (Buyers)</div>
+                <div className="space-y-1 font-mono text-xs">
+                  {bids.length === 0 && <div className="text-slate-500 py-2">No resting bids</div>}
+                  {bids.map((lvl) => (
+                    <div key={lvl.price} className="relative flex justify-between px-2.5 py-1.5 rounded bg-slate-950/80 overflow-hidden">
+                      <div className="absolute inset-y-0 right-0 bg-emerald-500/15" style={{ width: `${Math.min(100, (lvl.totalQuantity / maxQty) * 100)}%` }} />
+                      <span className="relative text-emerald-400 font-semibold">{Number(lvl.price).toFixed(2)}</span>
+                      <span className="relative text-slate-200">{lvl.totalQuantity} ({lvl.orderCount})</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            {/* Live Trades Tape */}
+            <section className="lg:col-span-4 bg-slate-900/90 border border-slate-800 rounded-xl p-5 space-y-4">
+              <h2 className="font-semibold text-slate-200">Live Trades Tape</h2>
+              <div className="space-y-1.5 font-mono text-xs max-h-[420px] overflow-y-auto">
+                {trades.length === 0 && <div className="text-slate-500 py-4">Waiting for matching executions...</div>}
+                {trades.map((t, idx) => (
+                  <div key={t.tradeId || idx} className="flex items-center justify-between px-2.5 py-2 rounded bg-slate-950 border border-slate-800/80">
+                    <div>
+                      <span className="text-emerald-400 font-bold">{Number(t.price).toFixed(2)}</span>
+                      <span className="text-slate-400 ml-2">× {t.quantity}</span>
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      {t.buyerTraderId} ↔ {t.sellerTraderId}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+        </div>
+      );
     }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<TradingTerminal />);
   </script>
 </body>
 </html>
